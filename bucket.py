@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Any, Iterable, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import boto3
 from botocore.exceptions import ClientError
@@ -64,6 +64,7 @@ R2_ENDPOINT_URL = os.environ.get(
     "R2_ENDPOINT_URL",
     f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_ACCOUNT_ID else "",
 ).strip()
+R2_PUBLIC_BASE_URL = os.environ.get("R2_PUBLIC_BASE_URL", "").strip()
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "").strip()
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() in {"1", "true", "yes", "on"}
 
@@ -79,6 +80,13 @@ def is_postgres() -> bool:
     return DATABASE_URL.startswith(("postgres://", "postgresql://"))
 
 
+def is_running_on_railway() -> bool:
+    return any(
+        os.environ.get(var)
+        for var in ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID")
+    )
+
+
 def row_to_dict(row: Any) -> dict[str, Any]:
     if isinstance(row, dict):
         return row
@@ -87,6 +95,12 @@ def row_to_dict(row: Any) -> dict[str, Any]:
 
 def get_connection():
     if is_postgres():
+        # Railway private hostnames are not resolvable from local machines.
+        # In that local-only case, transparently fall back to SQLite.
+        if ".railway.internal" in DATABASE_URL and not is_running_on_railway():
+            connection = sqlite3.connect(SQLITE_PATH)
+            connection.row_factory = sqlite3.Row
+            return "sqlite", connection
         try:
             import psycopg
             from psycopg.rows import dict_row
@@ -343,11 +357,12 @@ def get_r2_client():
 
 
 def build_public_url(object_key: str) -> str:
-    if R2_ENDPOINT_URL:
-        return f"{R2_ENDPOINT_URL.rstrip('/')}/{R2_BUCKET_NAME}/{object_key}"
+    encoded_key = quote(object_key, safe="/")
+    if R2_PUBLIC_BASE_URL:
+        return f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{encoded_key}"
     if APP_BASE_URL:
-        return f"{APP_BASE_URL.rstrip('/')}/{object_key}"
-    return object_key
+        return f"{APP_BASE_URL.rstrip('/')}/public/{encoded_key}"
+    return f"/public/{encoded_key}"
 
 
 def format_r2_error(exc: Exception) -> str:
@@ -868,6 +883,9 @@ def dashboard_page(
         encoded_path = quote(item["display_path"], safe="/")
         download_url = f"/files/{encoded_path}?subdirectory={safe_subdir_query}"
         delete_url = f"/files/{encoded_path}/delete"
+        public_url = build_public_url(item["object_key"])
+        split_public_url = urlsplit(public_url)
+        public_url_path = split_public_url.path or public_url
         file_rows.append(
             f"""
             <tr class="file-row-main">
@@ -887,7 +905,10 @@ def dashboard_page(
               </td>
             </tr>
             <tr class="file-row-sub">
-              <td colspan="5"><code>{html.escape(item['object_key'])}</code></td>
+                            <td colspan="5">
+                                <div>Public URL path: <a href="{html.escape(public_url)}" target="_blank" rel="noopener noreferrer"><code>{html.escape(public_url_path)}</code></a></div>
+                                <div>Object key: <code>{html.escape(item['object_key'])}</code></div>
+                            </td>
             </tr>
             """
         )
@@ -1193,6 +1214,17 @@ def download_file(request: Request, relative_path: str, subdirectory: str = ""):
     object_key = make_object_key(normalized_subdir, normalized_path)
     try:
         return build_file_response(object_key)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=f"Download failed: {format_r2_error(exc)}") from exc
+    except ClientError as exc:
+        raise HTTPException(status_code=502, detail=f"Download failed: {format_r2_error(exc)}") from exc
+
+
+@app.get("/public/{object_key:path}")
+def public_file(object_key: str):
+    normalized_key = normalize_relative_path(object_key)
+    try:
+        return build_file_response(normalized_key)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=f"Download failed: {format_r2_error(exc)}") from exc
     except ClientError as exc:
