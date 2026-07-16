@@ -595,6 +595,28 @@ def delete_user_account(target_email: str) -> None:
         connection.close()
 
 
+def renew_superuser_password(new_password: str) -> None:
+    if len(new_password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters long.")
+
+    super_email = normalize_email(SUPERUSER_EMAIL)
+    user = get_user_by_email(super_email)
+    if not user:
+        raise HTTPException(status_code=404, detail="Superuser account not found.")
+
+    engine, connection = get_connection()
+    try:
+        execute(
+            connection,
+            engine,
+            "UPDATE users SET password_hash = ? WHERE email = ?",
+            (hash_password(new_password), super_email),
+        )
+        commit(connection)
+    finally:
+        connection.close()
+
+
 def list_subdirectories() -> list[str]:
     engine, connection = get_connection()
     try:
@@ -951,6 +973,18 @@ def dashboard_page(
                         </div>
                         <button class="danger" type="submit">Remove user</button>
                     </form>
+                    <form class="stack" method="post" action="/users/superuser/password">
+                        <input type="hidden" name="csrf_token" value="{html.escape(session['csrf'])}">
+                        <div>
+                            <label for="superuser_new_password">Renew superuser password</label>
+                            <input id="superuser_new_password" name="new_password" type="password" minlength="8" autocomplete="new-password" required>
+                        </div>
+                        <div>
+                            <label for="superuser_confirm_password">Confirm new password</label>
+                            <input id="superuser_confirm_password" name="confirm_password" type="password" minlength="8" autocomplete="new-password" required>
+                        </div>
+                        <button class="primary" type="submit">Update superuser password</button>
+                    </form>
         </section>
         """
 
@@ -1204,6 +1238,28 @@ def delete_user_route(request: Request, csrf_token: str = Form(...), user_email:
         return dashboard_page(user, session, DEFAULT_SUBDIRECTORY, message=f"Removed user: {normalize_email(user_email)}")
     except HTTPException as exc:
         return dashboard_page(user, session, DEFAULT_SUBDIRECTORY, message=f"Could not remove user: {exc.detail}")
+
+
+@app.post("/users/superuser/password")
+def renew_superuser_password_route(
+    request: Request,
+    csrf_token: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+):
+    session = require_session(request)
+    require_csrf(request, session, csrf_token)
+    user = require_user(request)
+    require_superuser(user)
+
+    if new_password != confirm_password:
+        return dashboard_page(user, session, DEFAULT_SUBDIRECTORY, message="Could not renew password: passwords do not match.")
+
+    try:
+        renew_superuser_password(new_password)
+        return dashboard_page(user, session, DEFAULT_SUBDIRECTORY, message="Superuser password renewed successfully.")
+    except HTTPException as exc:
+        return dashboard_page(user, session, DEFAULT_SUBDIRECTORY, message=f"Could not renew password: {exc.detail}")
 
 
 @app.get("/files/{relative_path:path}")
