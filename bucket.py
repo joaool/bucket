@@ -50,6 +50,7 @@ APP_TITLE = "FrameConnection Bucket"
 DEFAULT_PREFIX = os.environ.get("R2_PREFIX", "cloudflare_domain")
 DEFAULT_SUBDIRECTORY = os.environ.get("DEFAULT_SUBDIRECTORY", "general")
 SUPERUSER_EMAIL = os.environ.get("SUPERUSER_EMAIL", "joaoccoliveira@live.com").strip().lower()
+SUPERUSER_INITIAL_PASSWORD = os.environ.get("SUPERUSER_INITIAL_PASSWORD", "joaoxx12345")
 INITIAL_API_TOKENS = os.environ.get("INITIAL_API_TOKENS", "").strip()
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 SESSION_COOKIE_NAME = os.environ.get("SESSION_COOKIE_NAME", "bucket_session")
@@ -572,6 +573,33 @@ def create_subdirectory(subdirectory: str, created_by: str) -> None:
     create_subdirectory_record(normalized, created_by)
     client = get_r2_client()
     client.put_object(Bucket=R2_BUCKET_NAME, Key=make_directory_marker_key(normalized), Body=b"")
+
+
+def ensure_superuser_account() -> None:
+    super_email = normalize_email(SUPERUSER_EMAIL)
+    if not super_email or "@" not in super_email:
+        return
+
+    if get_user_by_email(super_email):
+        return
+
+    engine, connection = get_connection()
+    try:
+        execute(
+            connection,
+            engine,
+            "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
+            (
+                str(uuid.uuid4()),
+                super_email,
+                hash_password(SUPERUSER_INITIAL_PASSWORD),
+                "superuser",
+                utc_now(),
+            ),
+        )
+        commit(connection)
+    finally:
+        connection.close()
 
 
 def delete_user_account(target_email: str) -> None:
@@ -1117,6 +1145,7 @@ def create_signup_token(created_by_email: str, allowed_email: Optional[str], exp
 ensure_schema()
 seed_initial_signup_tokens()
 ensure_default_directory()
+ensure_superuser_account()
 
 
 @app.on_event("startup")
@@ -1124,6 +1153,7 @@ def on_startup() -> None:
     ensure_schema()
     seed_initial_signup_tokens()
     ensure_default_directory()
+    ensure_superuser_account()
 
 
 @app.get("/", response_class=HTMLResponse)
