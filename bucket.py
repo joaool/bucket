@@ -906,7 +906,7 @@ def dashboard_page(
             </tr>
             <tr class="file-row-sub">
                             <td colspan="5">
-                                <div>Public URL path: <a href="{html.escape(public_url)}" target="_blank" rel="noopener noreferrer"><code>{html.escape(public_url_path)}</code></a></div>
+                                <div>Public URL path: <a href="{html.escape(public_url)}"><code>{html.escape(public_url_path)}</code></a></div>
                                 <div>Object key: <code>{html.escape(item['object_key'])}</code></div>
                             </td>
             </tr>
